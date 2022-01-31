@@ -88,7 +88,7 @@ func (c *TkgClient) InitRegionDryRun(options *InitRegionOptions) ([]byte, error)
 // InitRegion create management cluster
 func (c *TkgClient) InitRegion(options *InitRegionOptions) error { //nolint:funlen,gocyclo
 	var err error
-	var regionalConfigBytes []byte
+	// var regionalConfigBytes []byte
 	var isSuccessful bool = false
 	var isStartedRegionalClusterCreation bool = false
 	var isBootstrapClusterCreated bool = false
@@ -174,7 +174,7 @@ func (c *TkgClient) InitRegion(options *InitRegionOptions) error { //nolint:funl
 	log.Info("Generating cluster configuration...")
 
 	// Obtain management cluster configuration of a provided flavor
-	if regionalConfigBytes, options.ClusterName, err = c.BuildRegionalClusterConfiguration(options); err != nil {
+	if _, options.ClusterName, err = c.BuildRegionalClusterConfiguration(options); err != nil {
 		return errors.Wrap(err, "unable to build management cluster configuration")
 	}
 
@@ -204,157 +204,160 @@ func (c *TkgClient) InitRegion(options *InitRegionOptions) error { //nolint:funl
 		return errors.Wrap(err, "unable to initialize providers")
 	}
 
-	isStartedRegionalClusterCreation = true
+	/*
+		isStartedRegionalClusterCreation = true
 
-	targetClusterNamespace := defaultTkgNamespace
-	if options.Namespace != "" {
-		targetClusterNamespace = options.Namespace
-	}
+		targetClusterNamespace := defaultTkgNamespace
+		if options.Namespace != "" {
+			targetClusterNamespace = options.Namespace
+		}
 
-	log.SendProgressUpdate(statusRunning, StepCreateManagementCluster, InitRegionSteps)
-	log.Info("Start creating management cluster...")
-	err = c.DoCreateCluster(bootStrapClusterClient, options.ClusterName, targetClusterNamespace, string(regionalConfigBytes))
-	if err != nil {
-		return errors.Wrap(err, "unable to create management cluster")
-	}
-
-	// save this context to tkg config incase the management cluster creation fails
-	bootstrapClusterContext := "kind-" + bootstrapClusterName
-	if options.UseExistingCluster {
-		bootstrapClusterContext, err = getCurrentContextFromDefaultKubeConfig()
+		log.SendProgressUpdate(statusRunning, StepCreateManagementCluster, InitRegionSteps)
+		log.Info("Start creating management cluster...")
+		err = c.DoCreateCluster(bootStrapClusterClient, options.ClusterName, targetClusterNamespace, string(regionalConfigBytes))
 		if err != nil {
-			return err
-		}
-	}
-	regionContext = region.RegionContext{ClusterName: options.ClusterName, ContextName: bootstrapClusterContext, SourceFilePath: bootstrapClusterKubeconfigPath, Status: region.Failed}
-
-	kubeConfigBytes, err := c.WaitForClusterInitializedAndGetKubeConfig(bootStrapClusterClient, options.ClusterName, targetClusterNamespace)
-	if err != nil {
-		return errors.Wrap(err, "unable to wait for cluster and get the cluster kubeconfig")
-	}
-
-	regionalClusterKubeconfigPath, err := getTKGKubeConfigPath(true)
-	if err != nil {
-		return err
-	}
-	// put a filelock to ensure mutual exclusion on updating kubeconfig
-	filelock, err = utils.GetFileLockWithTimeOut(filepath.Join(c.tkgConfigDir, constants.LocalTanzuFileLock), utils.DefaultLockTimeout)
-	if err != nil {
-		return errors.Wrap(err, "cannot acquire lock for updating management cluster kubeconfig")
-	}
-
-	mergeFile := getDefaultKubeConfigFile()
-	log.Infof("Saving management cluster kubeconfig into %s", mergeFile)
-	// merge the management cluster kubeconfig into user input kubeconfig path/default kubeconfig path
-	err = MergeKubeConfigWithoutSwitchContext(kubeConfigBytes, mergeFile)
-	if err != nil {
-		return errors.Wrap(err, "unable to merge management cluster kubeconfig")
-	}
-
-	// merge the management cluster kubeconfig into tkg managed kubeconfig
-	kubeContext, err := MergeKubeConfigAndSwitchContext(kubeConfigBytes, regionalClusterKubeconfigPath)
-	if err != nil {
-		return errors.Wrap(err, "unable to save management cluster kubeconfig to TKG managed kubeconfig")
-	}
-
-	if err := filelock.Unlock(); err != nil {
-		log.Warningf("cannot acquire lock for updating management cluster kubeconfigconfig, reason: %v", err)
-	}
-
-	regionalClusterClient, err := clusterclient.NewClient(regionalClusterKubeconfigPath, kubeContext, clusterclient.Options{OperationTimeout: c.timeout})
-	if err != nil {
-		return errors.Wrap(err, "unable to get management cluster client")
-	}
-
-	log.SendProgressUpdate(statusRunning, StepInstallProvidersOnRegionalCluster, InitRegionSteps)
-	log.Info("Installing providers on management cluster...")
-	if err = c.InitializeProviders(options, regionalClusterClient, regionalClusterKubeconfigPath); err != nil {
-		return errors.Wrap(err, "unable to initialize providers on management cluster")
-	}
-
-	if err := regionalClusterClient.PatchClusterAPIAWSControllersToUseEC2Credentials(); err != nil {
-		return err
-	}
-
-	log.Info("Waiting for the management cluster to get ready for move...")
-	if err := c.WaitForClusterReadyForMove(bootStrapClusterClient, options.ClusterName, targetClusterNamespace); err != nil {
-		return errors.Wrap(err, "unable to wait for cluster getting ready for move")
-	}
-
-	log.Info("Waiting for addons installation...")
-	if err := c.WaitForAddons(waitForAddonsOptions{
-		regionalClusterClient: bootStrapClusterClient,
-		workloadClusterClient: regionalClusterClient,
-		clusterName:           options.ClusterName,
-		namespace:             options.Namespace,
-		waitForCNI:            true,
-	}); err != nil {
-		return errors.Wrap(err, "error waiting for addons to get installed")
-	}
-
-	log.SendProgressUpdate(statusRunning, StepMoveClusterAPIObjects, InitRegionSteps)
-	log.Info("Moving all Cluster API objects from bootstrap cluster to management cluster...")
-	// Move all Cluster API objects from bootstrap cluster to created to management cluster for all namespaces
-	if err = c.MoveObjects(bootstrapClusterKubeconfigPath, regionalClusterKubeconfigPath, targetClusterNamespace); err != nil {
-		return errors.Wrap(err, "unable to move Cluster API objects from bootstrap cluster to management cluster")
-	}
-
-	regionContext = region.RegionContext{ClusterName: options.ClusterName, ContextName: kubeContext, SourceFilePath: regionalClusterKubeconfigPath, Status: region.Success}
-
-	err = c.PatchClusterInitOperations(regionalClusterClient, options, targetClusterNamespace)
-	if err != nil {
-		return errors.Wrap(err, "unable to patch cluster object")
-	}
-
-	// install TMC agent workloads on the management cluster
-	if options.TmcRegistrationURL != "" {
-		if err = registerWithTmc(options.TmcRegistrationURL, regionalClusterClient); err != nil {
-			log.Error(err, "Failed to register management cluster to Tanzu Mission Control")
-
-			log.Warningf("\nTo attach the management cluster to Tanzu Mission Control:")
-			log.Warningf("\ttanzu management-cluster register --tmc-registration-url %s", options.TmcRegistrationURL)
-		}
-	}
-
-	if err != nil {
-		return errors.Wrap(err, "unable to parse provider name")
-	}
-
-	// start CEIP telemetry cronjob if cluster is opt-in
-	if options.CeipOptIn {
-		bomConfig, err := c.tkgBomClient.GetDefaultTkgBOMConfiguration()
-		if err != nil {
-			return errors.Wrapf(err, "failed to get default bom configuration")
+			return errors.Wrap(err, "unable to create management cluster")
 		}
 
-		httpProxy, httpsProxy, noProxy := "", "", ""
-		if httpProxy, err = c.TKGConfigReaderWriter().Get(constants.TKGHTTPProxy); err == nil && httpProxy != "" {
-			httpsProxy, _ = c.TKGConfigReaderWriter().Get(constants.TKGHTTPSProxy)
-			noProxy, err = c.getFullTKGNoProxy(providerName)
+		// save this context to tkg config incase the management cluster creation fails
+		bootstrapClusterContext := "kind-" + bootstrapClusterName
+		if options.UseExistingCluster {
+			bootstrapClusterContext, err = getCurrentContextFromDefaultKubeConfig()
 			if err != nil {
 				return err
 			}
 		}
+		regionContext = region.RegionContext{ClusterName: options.ClusterName, ContextName: bootstrapClusterContext, SourceFilePath: bootstrapClusterKubeconfigPath, Status: region.Failed}
 
-		if err = regionalClusterClient.AddCEIPTelemetryJob(options.ClusterName, providerName, bomConfig, "", "", httpProxy, httpsProxy, noProxy); err != nil {
-			log.Error(err, "Failed to start CEIP telemetry job on management cluster")
-
-			log.Warningf("\nTo have this cluster participate in VMware CEIP:")
-			log.Warningf("\ttanzu management-cluster ceip-participation set true")
+		kubeConfigBytes, err := c.WaitForClusterInitializedAndGetKubeConfig(bootStrapClusterClient, options.ClusterName, targetClusterNamespace)
+		if err != nil {
+			return errors.Wrap(err, "unable to wait for cluster and get the cluster kubeconfig")
 		}
-	}
 
-	log.Info("Waiting for additional components to be up and running...")
-	if err := c.WaitForAddonsDeployments(regionalClusterClient); err != nil {
-		return err
-	}
+		regionalClusterKubeconfigPath, err := getTKGKubeConfigPath(true)
+		if err != nil {
+			return err
+		}
+		// put a filelock to ensure mutual exclusion on updating kubeconfig
+		filelock, err = utils.GetFileLockWithTimeOut(filepath.Join(c.tkgConfigDir, constants.LocalTanzuFileLock), utils.DefaultLockTimeout)
+		if err != nil {
+			return errors.Wrap(err, "cannot acquire lock for updating management cluster kubeconfig")
+		}
 
-	log.Info("Waiting for packages to be up and running...")
-	if err := c.WaitForPackages(regionalClusterClient, regionalClusterClient, options.ClusterName, targetClusterNamespace); err != nil {
-		log.Warningf("Warning: Management cluster is created successfully, but some packages are failing. %v", err)
-	}
+		mergeFile := getDefaultKubeConfigFile()
+		log.Infof("Saving management cluster kubeconfig into %s", mergeFile)
+		// merge the management cluster kubeconfig into user input kubeconfig path/default kubeconfig path
+		err = MergeKubeConfigWithoutSwitchContext(kubeConfigBytes, mergeFile)
+		if err != nil {
+			return errors.Wrap(err, "unable to merge management cluster kubeconfig")
+		}
 
-	log.Infof("You can now access the management cluster %s by running 'kubectl config use-context %s'", options.ClusterName, kubeContext)
+		// merge the management cluster kubeconfig into tkg managed kubeconfig
+		kubeContext, err := MergeKubeConfigAndSwitchContext(kubeConfigBytes, regionalClusterKubeconfigPath)
+		if err != nil {
+			return errors.Wrap(err, "unable to save management cluster kubeconfig to TKG managed kubeconfig")
+		}
+
+		if err := filelock.Unlock(); err != nil {
+			log.Warningf("cannot acquire lock for updating management cluster kubeconfigconfig, reason: %v", err)
+		}
+
+		regionalClusterClient, err := clusterclient.NewClient(regionalClusterKubeconfigPath, kubeContext, clusterclient.Options{OperationTimeout: c.timeout})
+		if err != nil {
+			return errors.Wrap(err, "unable to get management cluster client")
+		}
+
+		log.SendProgressUpdate(statusRunning, StepInstallProvidersOnRegionalCluster, InitRegionSteps)
+		log.Info("Installing providers on management cluster...")
+		if err = c.InitializeProviders(options, regionalClusterClient, regionalClusterKubeconfigPath); err != nil {
+			return errors.Wrap(err, "unable to initialize providers on management cluster")
+		}
+
+		if err := regionalClusterClient.PatchClusterAPIAWSControllersToUseEC2Credentials(); err != nil {
+			return err
+		}
+
+		log.Info("Waiting for the management cluster to get ready for move...")
+		if err := c.WaitForClusterReadyForMove(bootStrapClusterClient, options.ClusterName, targetClusterNamespace); err != nil {
+			return errors.Wrap(err, "unable to wait for cluster getting ready for move")
+		}
+
+		log.Info("Waiting for addons installation...")
+		if err := c.WaitForAddons(waitForAddonsOptions{
+			regionalClusterClient: bootStrapClusterClient,
+			workloadClusterClient: regionalClusterClient,
+			clusterName:           options.ClusterName,
+			namespace:             options.Namespace,
+			waitForCNI:            true,
+		}); err != nil {
+			return errors.Wrap(err, "error waiting for addons to get installed")
+		}
+
+		log.SendProgressUpdate(statusRunning, StepMoveClusterAPIObjects, InitRegionSteps)
+		log.Info("Moving all Cluster API objects from bootstrap cluster to management cluster...")
+		// Move all Cluster API objects from bootstrap cluster to created to management cluster for all namespaces
+		if err = c.MoveObjects(bootstrapClusterKubeconfigPath, regionalClusterKubeconfigPath, targetClusterNamespace); err != nil {
+			return errors.Wrap(err, "unable to move Cluster API objects from bootstrap cluster to management cluster")
+		}
+
+		regionContext = region.RegionContext{ClusterName: options.ClusterName, ContextName: kubeContext, SourceFilePath: regionalClusterKubeconfigPath, Status: region.Success}
+
+		err = c.PatchClusterInitOperations(regionalClusterClient, options, targetClusterNamespace)
+		if err != nil {
+			return errors.Wrap(err, "unable to patch cluster object")
+		}
+
+		// install TMC agent workloads on the management cluster
+		if options.TmcRegistrationURL != "" {
+			if err = registerWithTmc(options.TmcRegistrationURL, regionalClusterClient); err != nil {
+				log.Error(err, "Failed to register management cluster to Tanzu Mission Control")
+
+				log.Warningf("\nTo attach the management cluster to Tanzu Mission Control:")
+				log.Warningf("\ttanzu management-cluster register --tmc-registration-url %s", options.TmcRegistrationURL)
+			}
+		}
+
+		if err != nil {
+			return errors.Wrap(err, "unable to parse provider name")
+		}
+
+		// start CEIP telemetry cronjob if cluster is opt-in
+		if options.CeipOptIn {
+			bomConfig, err := c.tkgBomClient.GetDefaultTkgBOMConfiguration()
+			if err != nil {
+				return errors.Wrapf(err, "failed to get default bom configuration")
+			}
+
+			httpProxy, httpsProxy, noProxy := "", "", ""
+			if httpProxy, err = c.TKGConfigReaderWriter().Get(constants.TKGHTTPProxy); err == nil && httpProxy != "" {
+				httpsProxy, _ = c.TKGConfigReaderWriter().Get(constants.TKGHTTPSProxy)
+				noProxy, err = c.getFullTKGNoProxy(providerName)
+				if err != nil {
+					return err
+				}
+			}
+
+			if err = regionalClusterClient.AddCEIPTelemetryJob(options.ClusterName, providerName, bomConfig, "", "", httpProxy, httpsProxy, noProxy); err != nil {
+				log.Error(err, "Failed to start CEIP telemetry job on management cluster")
+
+				log.Warningf("\nTo have this cluster participate in VMware CEIP:")
+				log.Warningf("\ttanzu management-cluster ceip-participation set true")
+			}
+		}
+
+		log.Info("Waiting for additional components to be up and running...")
+		if err := c.WaitForAddonsDeployments(regionalClusterClient); err != nil {
+			return err
+		}
+
+		log.Info("Waiting for packages to be up and running...")
+		if err := c.WaitForPackages(regionalClusterClient, regionalClusterClient, options.ClusterName, targetClusterNamespace); err != nil {
+			log.Warningf("Warning: Management cluster is created successfully, but some packages are failing. %v", err)
+		}
+
+		log.Infof("You can now access the management cluster %s by running 'kubectl config use-context %s'", options.ClusterName, kubeContext)
+	*/
+
 	isSuccessful = true
 	return nil
 }
